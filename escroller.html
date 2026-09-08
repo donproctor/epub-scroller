@@ -404,7 +404,10 @@
 
         function saveBookmark() {
 
+            console.log("[bookmark] saveBookmark() called, currentBookKey =", currentBookKey);
+
             if (!currentBookKey) {
+                console.log("[bookmark] bailing: no currentBookKey");
                 return;
             }
 
@@ -415,26 +418,52 @@
             var x = paneRect.left + paneRect.width / 2;
             var y = paneRect.top + 2;
 
+            // #middle-zone sits visually on top of #textPane (that's
+            // how taps get captured), which means caretRangeFromPoint
+            // would otherwise "see" that empty div instead of the
+            // text underneath it. Briefly step it out of the way.
+            var middleZone = document.getElementById("middle-zone");
+            var previousPointerEvents = middleZone.style.pointerEvents;
+            middleZone.style.pointerEvents = "none";
+
             var caret = getCaretAtPoint(x, y);
 
-            if (!caret || caret.node.nodeType !== Node.TEXT_NODE) {
+            middleZone.style.pointerEvents = previousPointerEvents;
+
+            console.log("[bookmark] paneRect =", paneRect, " x,y =", x, y, " caret =", caret);
+
+            if (!caret) {
+                console.log("[bookmark] bailing: getCaretAtPoint returned null (browser support issue, or point missed the text entirely)");
+                return;
+            }
+
+            if (caret.node.nodeType !== Node.TEXT_NODE) {
+                console.log("[bookmark] bailing: caret landed on a non-text node:", caret.node);
                 return;
             }
 
             var text = caret.node.textContent;
             var snippet = text.substr(caret.offset, bookmarkSnippetLength);
 
+            console.log("[bookmark] snippet =", JSON.stringify(snippet));
+
             // Too close to the end of the book to get a full-length
             // snippet — not worth saving, previous bookmark (if any)
             // is more useful than a too-short/ambiguous one.
             if (snippet.length < 20) {
+                console.log("[bookmark] bailing: snippet too short (" + snippet.length + " chars)");
                 return;
             }
 
-            localStorage.setItem(
-                currentBookKey,
-                JSON.stringify({ snippet: snippet })
-            );
+            try {
+                localStorage.setItem(
+                    currentBookKey,
+                    JSON.stringify({ snippet: snippet })
+                );
+                console.log("[bookmark] saved under key:", currentBookKey);
+            } catch (error) {
+                console.log("[bookmark] localStorage.setItem threw:", error);
+            }
         }
 
 
