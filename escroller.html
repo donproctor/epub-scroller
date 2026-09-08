@@ -167,6 +167,14 @@
         // is less than one pixel.
         var scrollPosition = 0;
 
+        // Identifies the currently-open book for bookmark storage.
+        // Set in readEpub(); null until a book has been opened.
+        var currentBookKey = null;
+
+        // How many characters of the text at the top of the viewport
+        // we store as the "bookmark" snippet.
+        var bookmarkSnippetLength = 60;
+
 
         // ------------------------------------------------------------
         // Elements
@@ -316,6 +324,18 @@
 
 
             // --------------------------------------------------------
+            // Identify this book for bookmark storage.
+            //
+            // There's no server and no stable id inside the EPUB
+            // that's cheap to get at here, so filename + size is
+            // the practical stand-in. Good enough to tell one book
+            // from another on the same device/browser.
+            // --------------------------------------------------------
+
+            currentBookKey = "epub-bookmark:" + file.name + ":" + file.size;
+
+
+            // --------------------------------------------------------
             // Display the book
             // --------------------------------------------------------
 
@@ -328,11 +348,148 @@
             scrollPosition = 0;
             running = false;
 
+            // Reader is now laid out, so geometry-based restoration
+            // (getBoundingClientRect) will give real numbers.
+            // Falls back to the top of the book if there's no
+            // bookmark, or the snippet can no longer be found.
+            restoreBookmark();
+
             // Move focus from the file input to the text pane.
             fileInput.blur();
             textPane.focus();
 
             updateStatus();
+        }
+
+
+        // ------------------------------------------------------------
+        // Bookmarking
+        //
+        // The bookmark is just a short snippet of text taken from
+        // whatever was at the top of the viewport when scrolling
+        // last stopped. Since #textPane holds one continuous text
+        // node, caretRangeFromPoint (or its Firefox equivalent,
+        // caretPositionFromPoint) can tell us exactly which character
+        // offset in that text node sits at a given pixel — no need
+        // to walk elements or track our own offsets.
+        // ------------------------------------------------------------
+
+        function getCaretAtPoint(x, y) {
+
+            if (document.caretRangeFromPoint) {
+
+                var range = document.caretRangeFromPoint(x, y);
+
+                if (!range) {
+                    return null;
+                }
+
+                return { node: range.startContainer, offset: range.startOffset };
+            }
+
+            if (document.caretPositionFromPoint) {
+
+                var position = document.caretPositionFromPoint(x, y);
+
+                if (!position) {
+                    return null;
+                }
+
+                return { node: position.offsetNode, offset: position.offset };
+            }
+
+            return null;
+        }
+
+
+        function saveBookmark() {
+
+            if (!currentBookKey) {
+                return;
+            }
+
+            var paneRect = textPane.getBoundingClientRect();
+
+            // A couple of pixels inside the top edge, so we're
+            // reliably over the text and not right on the boundary.
+            var x = paneRect.left + paneRect.width / 2;
+            var y = paneRect.top + 2;
+
+            var caret = getCaretAtPoint(x, y);
+
+            if (!caret || caret.node.nodeType !== Node.TEXT_NODE) {
+                return;
+            }
+
+            var text = caret.node.textContent;
+            var snippet = text.substr(caret.offset, bookmarkSnippetLength);
+
+            // Too close to the end of the book to get a full-length
+            // snippet — not worth saving, previous bookmark (if any)
+            // is more useful than a too-short/ambiguous one.
+            if (snippet.length < 20) {
+                return;
+            }
+
+            localStorage.setItem(
+                currentBookKey,
+                JSON.stringify({ snippet: snippet })
+            );
+        }
+
+
+        function restoreBookmark() {
+
+            if (!currentBookKey) {
+                return false;
+            }
+
+            var raw = localStorage.getItem(currentBookKey);
+
+            if (!raw) {
+                return false;
+            }
+
+            var data;
+
+            try {
+                data = JSON.parse(raw);
+            } catch (error) {
+                return false;
+            }
+
+            if (!data || !data.snippet) {
+                return false;
+            }
+
+            var textNode = textPane.firstChild;
+
+            if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+                return false;
+            }
+
+            var content = textNode.textContent;
+            var index = content.indexOf(data.snippet);
+
+            if (index < 0) {
+                // Snippet no longer found (book re-parsed differently,
+                // etc). Silently fall back to the top of the book.
+                return false;
+            }
+
+            var range = document.createRange();
+            range.setStart(textNode, index);
+            range.setEnd(textNode, index + data.snippet.length);
+
+            var rangeRect = range.getBoundingClientRect();
+            var paneRect = textPane.getBoundingClientRect();
+
+            // Shift scrollTop by however far the found text currently
+            // sits from the top of the pane.
+            textPane.scrollTop += (rangeRect.top - paneRect.top);
+            scrollPosition = textPane.scrollTop;
+
+            return true;
         }
 
 
@@ -442,11 +599,17 @@
 
         // ------------------------------------------------------------
         // Stop scrolling
+        //
+        // This is the natural "scrolling has stopped" event: it fires
+        // whether stopping was caused by the five-minute timeout, the
+        // end of the book, or the user pausing manually (space / tap).
+        // That makes it the right place to save the bookmark.
         // ------------------------------------------------------------
         function stopScrolling() {
             running = false;
             scrollLoop.lastTime = null;
             updateStatus();
+            saveBookmark();
         }
 
         // ------------------------------------------------------------
@@ -610,6 +773,8 @@
         // we forward the scroll ourselves.
         // ------------------------------------------------------------
 
+        var wheelBookmarkTimer = null;
+
         document.getElementById("middle-zone").addEventListener(
             "wheel",
             function (event) {
@@ -620,11 +785,34 @@
                 scrollPosition = textPane.scrollTop;
 
                 if (running) {
+                    // stopScrolling() already saves the bookmark.
                     stopScrolling();
+                } else {
+                    // Already paused and manually scrolling — there's
+                    // no natural "stopped" event to hang onto here,
+                    // so approximate one: save a little while after
+                    // the wheel goes quiet.
+                    clearTimeout(wheelBookmarkTimer);
+                    wheelBookmarkTimer = setTimeout(saveBookmark, 400);
                 }
             },
             { passive: false }
         );
+
+
+        // ------------------------------------------------------------
+        // Safety net: also save if the tab is hidden or the page is
+        // being closed, in case that happens mid-scroll without one
+        // of the above "stopped" events having fired yet.
+        // ------------------------------------------------------------
+
+        document.addEventListener("visibilitychange", function () {
+            if (document.hidden) {
+                saveBookmark();
+            }
+        });
+
+        window.addEventListener("pagehide", saveBookmark);
 
 
         // ------------------------------------------------------------
