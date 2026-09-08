@@ -2,6 +2,7 @@
 <html>
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
     <title>EPUB Reader</title>
 
     <!-- The only library we need: reads ZIP files such as EPUBs -->
@@ -10,6 +11,14 @@
     <style>
         * {
             box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            /* Prevents iOS from auto-bumping font sizes on rotation,
+               which can throw off the width math independently of
+               the font-size changes we make ourselves. */
+            -webkit-text-size-adjust: 100%;
         }
 
         body {
@@ -33,14 +42,23 @@
         #reader {
             display: none;
             height: 100vh;
+            width: 100%;
             padding: 20px;
         }
 
         #textPane {
             height: calc(100vh - 40px);
+            width: 100%;
+            max-width: 100%;
             overflow-y: auto;
             overflow-x: hidden;
             overflow-wrap: anywhere;
+            /* Safari (especially iOS) doesn't always honor
+               overflow-wrap: anywhere when white-space is pre-wrap.
+               word-break: break-word is the older, more widely-
+               respected property and acts as a fallback so long
+               runs of text still wrap instead of overflowing. */
+            word-break: break-word;
             font-size: 22px;
             line-height: 1.6;
             white-space: pre-wrap;
@@ -53,6 +71,27 @@
 
         #textPane::-webkit-scrollbar {
             display: none;               /* Chrome, Safari */
+        }
+
+        /*
+         * On phone-sized screens, the reader's + textPane's combined
+         * horizontal padding (20px + 30px = 50px per side) eats a
+         * large chunk of a ~390px-wide screen. Shrink just the
+         * horizontal padding down there — vertical padding is left
+         * alone since #textPane's height is calculated from it
+         * (see the calc(100vh - 40px) above).
+         */
+        @media (max-width: 480px) {
+
+            #reader {
+                padding-left: 6px;
+                padding-right: 6px;
+            }
+
+            #textPane {
+                padding-left: 8px;
+                padding-right: 8px;
+            }
         }
 
         #fileInput {
@@ -101,6 +140,11 @@
             width: 100%;
             height: 100%;
             z-index: 5;
+            /* We handle dragging ourselves (see setupMiddleZone in the
+               script), so tell the browser not to apply its own touch
+               scrolling/gestures here — otherwise the two fight each
+               other on iOS Safari and Chrome. */
+            touch-action: none;
         }
 
         #bottom-left {
@@ -160,7 +204,7 @@
         var running = false;
 
         var startTime = 0;
-        var maxScrolltime = 1 * 60 * 1000;
+        var maxScrolltime = 3 * 60 * 1000;
 
         // Keep the scroll position separately as a floating-point number.
         // This allows smooth scrolling even when movement per frame
@@ -174,6 +218,11 @@
         // How many characters of the text at the top of the viewport
         // we store as the "bookmark" snippet.
         var bookmarkSnippetLength = 60;
+
+        // Key under which the user's preferred scroll speed and font
+        // size are stored, so they carry over between sessions
+        // (separately from any book's own bookmark).
+        var settingsKey = "epub-reader-settings";
 
 
         // ------------------------------------------------------------
@@ -523,6 +572,79 @@
 
 
         // ------------------------------------------------------------
+        // Reading preferences (scroll speed / font size)
+        //
+        // Unlike a bookmark, which is per-book, these are global:
+        // whatever speed and font size you last landed on become the
+        // defaults the next time any book is opened.
+        // ------------------------------------------------------------
+
+        function saveSettings() {
+
+            try {
+                localStorage.setItem(
+                    settingsKey,
+                    JSON.stringify({
+                        scrollSpeed: scrollSpeed,
+                        fontSize: fontSize
+                    })
+                );
+            } catch (error) {
+                console.log("[settings] localStorage.setItem threw:", error);
+            }
+        }
+
+
+        function loadSettings() {
+
+            var raw;
+
+            try {
+                raw = localStorage.getItem(settingsKey);
+            } catch (error) {
+                return;
+            }
+
+            if (!raw) {
+                return;
+            }
+
+            var data;
+
+            try {
+                data = JSON.parse(raw);
+            } catch (error) {
+                return;
+            }
+
+            if (!data) {
+                return;
+            }
+
+            // Clamp to the current min/max in case those constants
+            // ever change between visits, or the stored value is
+            // corrupt.
+            if (typeof data.scrollSpeed === "number") {
+
+                scrollSpeed = Math.min(
+                    maxSpeed,
+                    Math.max(minSpeed, data.scrollSpeed)
+                );
+            }
+
+            if (typeof data.fontSize === "number") {
+
+                fontSize = Math.min(
+                    maxFont,
+                    Math.max(minFont, data.fontSize)
+                );
+
+                textPane.style.fontSize = fontSize + "px";
+            }
+        }
+
+
+        // ------------------------------------------------------------
         // Start / stop scrolling
         // ------------------------------------------------------------
         function toggleScrolling() {
@@ -651,6 +773,8 @@
                 scrollSpeed = maxSpeed;
             }
 
+            saveSettings();
+
             // Speeding up implies you want to be reading, so start
             // scrolling if it was paused.
             if (!running) {
@@ -668,6 +792,7 @@
                 scrollSpeed = minSpeed;
             }
 
+            saveSettings();
             updateStatus();
         }
 
@@ -684,6 +809,7 @@
             }
 
             textPane.style.fontSize = fontSize + "px";
+            saveSettings();
             updateStatus();
         }
 
@@ -696,6 +822,7 @@
             }
 
             textPane.style.fontSize = fontSize + "px";
+            saveSettings();
             updateStatus();
         }
 
@@ -791,7 +918,104 @@
         setupZone("bottom-left", decreaseFontSize);
         setupZone("top-right", increaseSpeed);
         setupZone("bottom-right", decreaseSpeed);
-        setupZone("middle-zone", toggleScrolling);
+
+
+        /*
+         * The middle zone needs to do two things instead of one:
+         * a short tap toggles play/pause (as before), but a drag
+         * should scroll the text underneath by the same distance
+         * the finger/pointer moves. Native touch scrolling can't do
+         * this on its own because the zone (not the text) is what
+         * actually receives the touch — see the #middle-zone
+         * touch-action comment in the CSS above.
+         */
+        function setupMiddleZone() {
+
+            var zone = document.getElementById("middle-zone");
+
+            var startY = 0;
+            var startScrollTop = 0;
+            var dragThreshold = 15;
+            var dragging = false;
+            var pointerIsDown = false;
+            var wasRunningBeforeDrag = false;
+
+            zone.addEventListener("pointerdown", function (event) {
+
+                startY = event.clientY;
+                startScrollTop = textPane.scrollTop;
+                dragging = false;
+                pointerIsDown = true;
+                wasRunningBeforeDrag = running;
+
+                try {
+                    zone.setPointerCapture(event.pointerId);
+                } catch (error) {
+                    // Pointer capture isn't available in every browser;
+                    // dragging still works without it.
+                }
+            });
+
+            zone.addEventListener("pointermove", function (event) {
+
+                // On mice/trackpads, pointermove fires continuously
+                // just from hovering — not only while a button is
+                // held. Without this check, moving the cursor at any
+                // point after a click would be misread as a drag,
+                // using that old click's position as the drag origin.
+                if (!pointerIsDown) {
+                    return;
+                }
+
+                var deltaY = event.clientY - startY;
+
+                if (!dragging && Math.abs(deltaY) > dragThreshold) {
+
+                    dragging = true;
+
+                    // A real drag takes over from auto-scroll.
+                    if (wasRunningBeforeDrag) {
+                        stopScrolling();
+                    }
+                }
+
+                if (dragging) {
+
+                    event.preventDefault();
+
+                    // Dragging up reveals content further down the
+                    // book, same as a native scroll gesture.
+                    textPane.scrollTop = startScrollTop - deltaY;
+                    scrollPosition = textPane.scrollTop;
+                }
+            });
+
+            zone.addEventListener("pointerup", function (event) {
+
+                pointerIsDown = false;
+
+                if (dragging) {
+                    dragging = false;
+                    saveBookmark();
+                } else {
+                    // Pointer never moved past the threshold: a tap.
+                    toggleScrolling();
+                }
+
+                try {
+                    zone.releasePointerCapture(event.pointerId);
+                } catch (error) {
+                    // Nothing to release.
+                }
+            });
+
+            zone.addEventListener("pointercancel", function () {
+                pointerIsDown = false;
+                dragging = false;
+            });
+        }
+
+        setupMiddleZone();
 
 
         // ------------------------------------------------------------
@@ -845,9 +1069,10 @@
 
 
         // ------------------------------------------------------------
-        // Initial status
+        // Initial load
         // ------------------------------------------------------------
 
+        loadSettings();
         updateStatus();
 
     </script>
