@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>EPUB Reader</title>
+
+    <!-- The only library we need: reads ZIP files such as EPUBs -->
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #0000aa;
+            color: #ffff00;
+            font-family: "Courier New", monospace;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #openScreen {
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 28px;
+        }
+
+        #reader {
+            display: none;
+            height: 100vh;
+            padding: 20px;
+        }
+
+        #textPane {
+            height: calc(100vh - 40px);
+            overflow-y: auto;
+            font-size: 22px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            cursor: default;
+            padding: 30px;
+            border: 2px solid #ffff00;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        #status {
+            position: fixed;
+            bottom: 5px;
+            right: 10px;
+            font-size: 14px;
+            background: #0000aa;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="openScreen">
+        CLICK TO OPEN EPUB
+    </div>
+
+    <input id="fileInput" type="file" accept=".epub">
+
+    <div id="reader">
+        <div id="textPane" tabindex="-1"></div>
+    </div>
+
+    <div id="status"></div>
+
+    <script>
+
+        // ------------------------------------------------------------
+        // Settings
+        // ------------------------------------------------------------
+
+        var scrollSpeed = 30;       // pixels per second
+        var normalSpeed = 30;
+
+        var minSpeed = 2;
+        var maxSpeed = 120;
+        var speedIncrement = 5;
+
+        var running = false;
+
+        var startTime = 0;
+        var maxScrolltime = 1 * 60 * 1000;
+
+        // Keep the scroll position separately as a floating-point number.
+        // This allows smooth scrolling even when movement per frame
+        // is less than one pixel.
+        var scrollPosition = 0;
+
+
+        // ------------------------------------------------------------
+        // Elements
+        // ------------------------------------------------------------
+
+        var openScreen = document.getElementById("openScreen");
+        var fileInput = document.getElementById("fileInput");
+        var reader = document.getElementById("reader");
+        var textPane = document.getElementById("textPane");
+        var status = document.getElementById("status");
+
+
+        // ------------------------------------------------------------
+        // Opening the file
+        // ------------------------------------------------------------
+
+        openScreen.onclick = function () {
+            fileInput.click();
+        };
+
+
+        fileInput.onchange = function () {
+
+            var file = fileInput.files[0];
+
+            if (!file) {
+                return;
+            }
+
+            readEpub(file);
+
+            // Allow re-selecting the same file later.
+            fileInput.value = "";
+        };
+
+
+        // ------------------------------------------------------------
+        // Read an EPUB
+        // ------------------------------------------------------------
+
+        async function readEpub(file) {
+
+            status.textContent = "Reading EPUB...";
+
+            var zip = await JSZip.loadAsync(file);
+
+            // Find the EPUB's container.xml
+            var container = await zip
+                .file("META-INF/container.xml")
+                .async("text");
+
+            var containerDoc = new DOMParser()
+                .parseFromString(container, "application/xml");
+
+            var rootFile =
+                containerDoc
+                    .querySelector("rootfile")
+                    .getAttribute("full-path");
+
+
+            // Read the OPF file
+            var opf = await zip
+                .file(rootFile)
+                .async("text");
+
+            var opfDoc = new DOMParser()
+                .parseFromString(opf, "application/xml");
+
+
+            // Directory containing the OPF file
+            var opfDirectory = "";
+
+            var slash = rootFile.lastIndexOf("/");
+
+            if (slash >= 0) {
+                opfDirectory = rootFile.substring(0, slash + 1);
+            }
+
+
+            // --------------------------------------------------------
+            // Build a list of the book's files
+            // --------------------------------------------------------
+
+            var files = {};
+
+            opfDoc.querySelectorAll("manifest item").forEach(function (item) {
+
+                var id = item.getAttribute("id");
+                var href = item.getAttribute("href");
+
+                files[id] = href;
+            });
+
+
+            // --------------------------------------------------------
+            // Find the reading order
+            // --------------------------------------------------------
+
+            var chapters = [];
+
+            opfDoc.querySelectorAll("spine itemref").forEach(function (itemref) {
+
+                var id = itemref.getAttribute("idref");
+
+                if (files[id]) {
+                    chapters.push(files[id]);
+                }
+            });
+
+
+            // --------------------------------------------------------
+            // Read every chapter
+            // --------------------------------------------------------
+
+            var completeText = "";
+
+            for (var i = 0; i < chapters.length; i++) {
+
+                var chapterPath =
+                    opfDirectory + decodeURIComponent(chapters[i]);
+
+                var chapter = zip.file(chapterPath);
+
+                if (!chapter) {
+                    continue;
+                }
+
+                var html = await chapter.async("text");
+
+                var doc = new DOMParser()
+                    .parseFromString(html, "text/html");
+
+
+                // Remove things that aren't part of the readable text
+                doc.querySelectorAll(
+                    "script, style, nav, svg"
+                ).forEach(function (element) {
+                    element.remove();
+                });
+
+
+                var text = doc.body.innerText;
+
+                completeText += text;
+                completeText += "\n\n";
+            }
+
+
+            // --------------------------------------------------------
+            // Display the book
+            // --------------------------------------------------------
+
+            textPane.textContent = completeText.trim();
+
+            openScreen.style.display = "none";
+            reader.style.display = "block";
+
+            textPane.scrollTop = 0;
+            scrollPosition = 0;
+            running = false;
+
+            // Move focus from the file input to the text pane.
+            fileInput.blur();
+            textPane.focus();
+
+            updateStatus();
+        }
+
+
+        // ------------------------------------------------------------
+        // Start / stop scrolling
+        // ------------------------------------------------------------
+        function toggleScrolling() {
+            if (running) {
+                stopScrolling();
+            } else {
+                startScrolling();
+            }
+        }
+
+
+        function startScrolling() {
+
+            var maxScroll =
+                textPane.scrollHeight - textPane.clientHeight;
+
+
+            // If we're already at the end, start again from the top.
+            if (textPane.scrollTop >= maxScroll) {
+                textPane.scrollTop = 0;
+            }
+
+
+            // Start our floating-point position at the actual
+            // current scroll position.
+            scrollPosition = textPane.scrollTop;
+
+            running = true;
+
+            // Use performance.now() for accurate animation timing.
+            startTime = performance.now();
+
+            scrollLoop.lastTime = startTime;
+
+            requestAnimationFrame(scrollLoop);
+
+            updateStatus();
+        }
+
+
+        // ------------------------------------------------------------
+        // Animation loop
+        // ------------------------------------------------------------
+
+        function scrollLoop(now) {
+
+            if (!running) {
+                return;
+            }
+
+
+            // --------------------------------------------------------
+            // Stop automatically after five minutes
+            // --------------------------------------------------------
+            if (now - startTime >= maxScrolltime) {
+                stopScrolling();
+                status.textContent = "Five minutes elapsed.";
+                return;
+            }
+
+
+            // --------------------------------------------------------
+            // Calculate time since the previous frame
+            // --------------------------------------------------------
+            var elapsed = now - scrollLoop.lastTime;
+
+            scrollLoop.lastTime = now;
+
+
+            // --------------------------------------------------------
+            // Move according to speed
+            //
+            // scrollSpeed is pixels per second.
+            //
+            // Example:
+            // 30 pixels/sec * 0.016 sec = 0.48 pixels
+            // --------------------------------------------------------
+            scrollPosition +=
+                scrollSpeed * elapsed / 1000;
+
+            textPane.scrollTop = scrollPosition;
+
+            // --------------------------------------------------------
+            // Stop at the end
+            // --------------------------------------------------------
+            var maxScroll =
+                textPane.scrollHeight - textPane.clientHeight;
+
+            if (scrollPosition >= maxScroll) {
+                textPane.scrollTop = maxScroll;
+                stopScrolling();
+                status.textContent = "End of book.";
+
+                return;
+            }
+
+
+            // --------------------------------------------------------
+            // Request the next animation frame
+            // --------------------------------------------------------
+            requestAnimationFrame(scrollLoop);
+        }
+
+        // ------------------------------------------------------------
+        // Stop scrolling
+        // ------------------------------------------------------------
+        function stopScrolling() {
+            running = false;
+            scrollLoop.lastTime = null;
+            updateStatus();
+        }
+
+        // ------------------------------------------------------------
+        // Speed
+        // ------------------------------------------------------------
+        function increaseSpeed() {
+            scrollSpeed += speedIncrement;
+
+            if (scrollSpeed > maxSpeed) {
+                scrollSpeed = maxSpeed;
+            }
+            updateStatus();
+        }
+
+
+        function decreaseSpeed() {
+            scrollSpeed -= speedIncrement;
+
+            if (scrollSpeed < minSpeed) {
+                scrollSpeed = minSpeed;
+            }
+
+            updateStatus();
+        }
+
+
+        // ------------------------------------------------------------
+        // Status display
+        // ------------------------------------------------------------
+
+        function updateStatus() {
+
+            status.textContent =
+                (running ? "PLAYING" : "PAUSED") +
+                "   SPEED: " + scrollSpeed +
+                "   SPACE: play/pause   ↑↓: speed";
+        }
+
+
+        // ------------------------------------------------------------
+        // Keyboard
+        // ------------------------------------------------------------
+
+        document.addEventListener("keydown", function (event) {
+
+            switch (event.code) {
+
+                // Space = play/pause
+                case "Space":
+
+                    event.preventDefault();
+
+                    toggleScrolling();
+
+                    break;
+
+
+                // Up arrow = faster
+                case "ArrowUp":
+
+                    event.preventDefault();
+
+                    increaseSpeed();
+
+                    break;
+
+
+                // Down arrow = slower
+                case "ArrowDown":
+
+                    event.preventDefault();
+
+                    decreaseSpeed();
+
+                    break;
+            }
+        });
+
+
+        // ------------------------------------------------------------
+        // Clicking the text starts/stops scrolling
+        // ------------------------------------------------------------
+
+        textPane.onclick = function () {
+            toggleScrolling();
+        };
+
+
+        // ------------------------------------------------------------
+        // Manual mouse-wheel scrolling stops auto-scroll
+        // ------------------------------------------------------------
+
+        textPane.onwheel = function () {
+
+            if (running) {
+                stopScrolling();
+            }
+        };
+
+
+        // ------------------------------------------------------------
+        // Initial status
+        // ------------------------------------------------------------
+
+        updateStatus();
+
+    </script>
+
+</body>
+</html>
