@@ -39,12 +39,20 @@
         #textPane {
             height: calc(100vh - 40px);
             overflow-y: auto;
+            overflow-x: hidden;
+            overflow-wrap: anywhere;
             font-size: 22px;
             line-height: 1.6;
             white-space: pre-wrap;
             cursor: default;
             padding: 30px;
-            border: 2px solid #ffff00;
+            border: none;
+            scrollbar-width: none;       /* Firefox */
+            -ms-overflow-style: none;    /* old Edge */
+        }
+
+        #textPane::-webkit-scrollbar {
+            display: none;               /* Chrome, Safari */
         }
 
         #fileInput {
@@ -57,6 +65,56 @@
             right: 10px;
             font-size: 14px;
             background: #0000aa;
+            color: #6666aa;
+            opacity: 0.6;
+        }
+
+        /*
+         * Invisible tap zones, for touchscreens and anywhere a
+         * keyboard isn't handy. Nested inside #reader so they only
+         * exist while a book is open (display:none hides descendants
+         * too, so they never sit on top of the open screen).
+         */
+        .control-zone {
+            position: fixed;
+            z-index: 10;
+            touch-action: manipulation;
+        }
+
+        #top-left {
+            top: 0;
+            left: 0;
+            width: 25%;
+            height: 12%;
+        }
+
+        #top-right {
+            top: 0;
+            right: 0;
+            width: 25%;
+            height: 12%;
+        }
+
+        #middle-zone {
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 5;
+        }
+
+        #bottom-left {
+            bottom: 0;
+            left: 0;
+            width: 25%;
+            height: 12%;
+        }
+
+        #bottom-right {
+            bottom: 0;
+            right: 0;
+            width: 25%;
+            height: 12%;
         }
     </style>
 </head>
@@ -71,6 +129,12 @@
 
     <div id="reader">
         <div id="textPane" tabindex="-1"></div>
+
+        <div id="top-left" class="control-zone"></div>
+        <div id="top-right" class="control-zone"></div>
+        <div id="middle-zone" class="control-zone"></div>
+        <div id="bottom-left" class="control-zone"></div>
+        <div id="bottom-right" class="control-zone"></div>
     </div>
 
     <div id="status"></div>
@@ -87,6 +151,11 @@
         var minSpeed = 2;
         var maxSpeed = 120;
         var speedIncrement = 5;
+
+        var fontSize = 22;          // matches #textPane's font-size in the CSS
+        var minFont = 12;
+        var maxFont = 48;
+        var fontIncrement = 2;
 
         var running = false;
 
@@ -389,7 +458,14 @@
             if (scrollSpeed > maxSpeed) {
                 scrollSpeed = maxSpeed;
             }
-            updateStatus();
+
+            // Speeding up implies you want to be reading, so start
+            // scrolling if it was paused.
+            if (!running) {
+                startScrolling();
+            } else {
+                updateStatus();
+            }
         }
 
 
@@ -405,6 +481,34 @@
 
 
         // ------------------------------------------------------------
+        // Font size
+        // ------------------------------------------------------------
+
+        function increaseFontSize() {
+            fontSize += fontIncrement;
+
+            if (fontSize > maxFont) {
+                fontSize = maxFont;
+            }
+
+            textPane.style.fontSize = fontSize + "px";
+            updateStatus();
+        }
+
+
+        function decreaseFontSize() {
+            fontSize -= fontIncrement;
+
+            if (fontSize < minFont) {
+                fontSize = minFont;
+            }
+
+            textPane.style.fontSize = fontSize + "px";
+            updateStatus();
+        }
+
+
+        // ------------------------------------------------------------
         // Status display
         // ------------------------------------------------------------
 
@@ -413,6 +517,7 @@
             status.textContent =
                 (running ? "PLAYING" : "PAUSED") +
                 "   SPEED: " + scrollSpeed +
+                "   FONT: " + fontSize +
                 "   SPACE: play/pause   ↑↓: speed";
         }
 
@@ -458,24 +563,68 @@
 
 
         // ------------------------------------------------------------
-        // Clicking the text starts/stops scrolling
+        // Tap zones (touch, mouse, or pen)
         // ------------------------------------------------------------
 
-        textPane.onclick = function () {
-            toggleScrolling();
-        };
+        /*
+         * Wires up a zone so that "action" runs only on a genuine tap
+         * (pointer goes down and up again close to the same spot) —
+         * not when a finger drags across the zone.
+         */
+        function setupZone(zoneId, action) {
+
+            var zone = document.getElementById(zoneId);
+
+            var startX = 0;
+            var startY = 0;
+            var dragThreshold = 15;
+
+            zone.addEventListener("pointerdown", function (event) {
+                startX = event.clientX;
+                startY = event.clientY;
+            });
+
+            zone.addEventListener("pointerup", function (event) {
+
+                var deltaX = Math.abs(event.clientX - startX);
+                var deltaY = Math.abs(event.clientY - startY);
+
+                if (deltaX < dragThreshold && deltaY < dragThreshold) {
+                    action();
+                }
+            });
+        }
+
+        setupZone("top-left", increaseFontSize);
+        setupZone("bottom-left", decreaseFontSize);
+        setupZone("top-right", increaseSpeed);
+        setupZone("bottom-right", decreaseSpeed);
+        setupZone("middle-zone", toggleScrolling);
 
 
         // ------------------------------------------------------------
-        // Manual mouse-wheel scrolling stops auto-scroll
+        // Manual mouse-wheel scrolling stops auto-scroll.
+        // The middle zone sits on top of textPane (so taps anywhere
+        // in the reading area toggle play/pause), which means wheel
+        // events land on the zone instead of textPane directly — so
+        // we forward the scroll ourselves.
         // ------------------------------------------------------------
 
-        textPane.onwheel = function () {
+        document.getElementById("middle-zone").addEventListener(
+            "wheel",
+            function (event) {
 
-            if (running) {
-                stopScrolling();
-            }
-        };
+                event.preventDefault();
+
+                textPane.scrollTop += event.deltaY;
+                scrollPosition = textPane.scrollTop;
+
+                if (running) {
+                    stopScrolling();
+                }
+            },
+            { passive: false }
+        );
 
 
         // ------------------------------------------------------------
