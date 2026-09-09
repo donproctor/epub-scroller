@@ -219,11 +219,6 @@
         // we store as the "bookmark" snippet.
         var bookmarkSnippetLength = 60;
 
-        // Key under which the user's preferred scroll speed and font
-        // size are stored, so they carry over between sessions
-        // (separately from any book's own bookmark).
-        var settingsKey = "epub-reader-settings";
-
 
         // ------------------------------------------------------------
         // Elements
@@ -258,6 +253,45 @@
             // Allow re-selecting the same file later.
             fileInput.value = "";
         };
+
+
+        // ------------------------------------------------------------
+        // Reflowing text
+        //
+        // Some EPUBs (older/converted ones especially) hard-wrap
+        // their prose with a <br> at the end of every print line,
+        // rather than relying on natural word-wrap. innerText turns
+        // each of those into a real "\n", and since #textPane uses
+        // white-space: pre-wrap (to preserve genuine paragraph
+        // breaks), those old hard breaks get preserved too — so
+        // lines stop wherever the original book happened to wrap,
+        // regardless of the current screen width or font size.
+        //
+        // This collapses those single "soft" line breaks back into
+        // spaces so the text can reflow naturally, while leaving
+        // real paragraph breaks (blank lines) alone.
+        // ------------------------------------------------------------
+
+        function reflowText(text) {
+
+            // Normalize any run of 3+ newlines down to a single
+            // paragraph break, so the split below treats them
+            // consistently.
+            text = text.replace(/\n{3,}/g, "\n\n");
+
+            var paragraphs = text.split(/\n\n/);
+
+            paragraphs = paragraphs.map(function (paragraph) {
+
+                // Collapse any leftover single line break — plus
+                // whatever spaces/tabs sit around it — into one space.
+                return paragraph
+                    .replace(/[ \t]*\n[ \t]*/g, " ")
+                    .trim();
+            });
+
+            return paragraphs.join("\n\n");
+        }
 
 
         // ------------------------------------------------------------
@@ -388,7 +422,7 @@
             // Display the book
             // --------------------------------------------------------
 
-            textPane.textContent = completeText.trim();
+            textPane.textContent = reflowText(completeText.trim());
 
             openScreen.style.display = "none";
             reader.style.display = "block";
@@ -572,79 +606,6 @@
 
 
         // ------------------------------------------------------------
-        // Reading preferences (scroll speed / font size)
-        //
-        // Unlike a bookmark, which is per-book, these are global:
-        // whatever speed and font size you last landed on become the
-        // defaults the next time any book is opened.
-        // ------------------------------------------------------------
-
-        function saveSettings() {
-
-            try {
-                localStorage.setItem(
-                    settingsKey,
-                    JSON.stringify({
-                        scrollSpeed: scrollSpeed,
-                        fontSize: fontSize
-                    })
-                );
-            } catch (error) {
-                console.log("[settings] localStorage.setItem threw:", error);
-            }
-        }
-
-
-        function loadSettings() {
-
-            var raw;
-
-            try {
-                raw = localStorage.getItem(settingsKey);
-            } catch (error) {
-                return;
-            }
-
-            if (!raw) {
-                return;
-            }
-
-            var data;
-
-            try {
-                data = JSON.parse(raw);
-            } catch (error) {
-                return;
-            }
-
-            if (!data) {
-                return;
-            }
-
-            // Clamp to the current min/max in case those constants
-            // ever change between visits, or the stored value is
-            // corrupt.
-            if (typeof data.scrollSpeed === "number") {
-
-                scrollSpeed = Math.min(
-                    maxSpeed,
-                    Math.max(minSpeed, data.scrollSpeed)
-                );
-            }
-
-            if (typeof data.fontSize === "number") {
-
-                fontSize = Math.min(
-                    maxFont,
-                    Math.max(minFont, data.fontSize)
-                );
-
-                textPane.style.fontSize = fontSize + "px";
-            }
-        }
-
-
-        // ------------------------------------------------------------
         // Start / stop scrolling
         // ------------------------------------------------------------
         function toggleScrolling() {
@@ -773,8 +734,6 @@
                 scrollSpeed = maxSpeed;
             }
 
-            saveSettings();
-
             // Speeding up implies you want to be reading, so start
             // scrolling if it was paused.
             if (!running) {
@@ -792,7 +751,6 @@
                 scrollSpeed = minSpeed;
             }
 
-            saveSettings();
             updateStatus();
         }
 
@@ -809,7 +767,6 @@
             }
 
             textPane.style.fontSize = fontSize + "px";
-            saveSettings();
             updateStatus();
         }
 
@@ -822,7 +779,6 @@
             }
 
             textPane.style.fontSize = fontSize + "px";
-            saveSettings();
             updateStatus();
         }
 
@@ -1069,10 +1025,9 @@
 
 
         // ------------------------------------------------------------
-        // Initial load
+        // Initial status
         // ------------------------------------------------------------
 
-        loadSettings();
         updateStatus();
 
     </script>
